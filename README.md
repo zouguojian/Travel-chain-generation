@@ -1,2 +1,5 @@
 # Travel-chain-generation
 Using traffic flow and travel preference data to generate individual travel chain on the Highway
+
+
+To integrate traffic state data with vehicle trajectory data, temporal alignment and fusion of the two datasets were conducted. Specifically, for each complete trajectory in the trajectory dataset, based on the timestamp when the vehicle passed the starting gantry, we extracted the historical data of the preceding 12 time slices (corresponding to 1 hour of historical states) from the traffic state data (both traffic speed and traffic flow). Through this process, we were able to provide dynamic traffic environment characteristics for each trajectory prior to its departure, including the historical traffic speed distribution across each section and the traffic flow conditions at each node. Ultimately, two corresponding traffic state datasets were generated, recording the traffic speed and flow information for the 12 preceding time slices before the departure of each trajectory.<img width="468" height="177" alt="image" src="https://github.com/user-attachments/assets/aa9702d1-4af5-4c14-943d-44e655dc7b80" />
