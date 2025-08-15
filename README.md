@@ -21,7 +21,6 @@ If you find this repository useful in your research, please cite the following p
   publisher={IEEE}
 }
 
-
 @article{zou2023will,
   title={When will we arrive? A novel multi-task spatio-temporal attention network based on individual preference for estimating travel time},
   author={Zou, Guojian and Lai, Ziliang and Ma, Changxi and Tu, Meiting and Fan, Jing and Li, Ye},
