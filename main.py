@@ -33,17 +33,19 @@ log = open(args.log_file, 'w')
 log_string(log, str(args)[10: -1])
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+log_string(log, 'device using: {:}'.format(device))
 
 # 数据集加载
 log_string(log, 'loading data...')
-train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset(args.traffic_file, args.batch_size, test_batch_size=1)
-log_string(log, f'max_city:   {max_city}\t\tmax_plate:   {max_plate}\t\tmax_v_type:   {max_v_type}\t\tmax_rote:   {max_rote}')
+train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_route, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset(args.traffic_file, args.batch_size, test_batch_size=1)
+log_string(log, f'max_city:   {max_city}\t\tmax_plate:   {max_plate}\t\tmax_v_type:   {max_v_type}\t\tmax_rote:   {max_route}')
 log_string(log, f'ytra_mean:   {ytra_mean:.4f}\t\tytra_std:   {ytra_std:.4f}')
 log_string(log, f'ytol_mean:   {ytol_mean:.4f}\t\tytol_std:   {ytol_std:.4f}')
 log_string(log, 'data loaded!')
 
 # 训练函数
-def train_model(model, train_loader, val_loader, epochs, lr, device):
+def train_model(model, train_loader, val_loader, epochs, lr, device, log):
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     best_val_loss = float('inf')
@@ -51,24 +53,28 @@ def train_model(model, train_loader, val_loader, epochs, lr, device):
     for epoch in range(epochs):
         model.train()
         train_loss = 0
+        iteration = 1
         for batch_x, batch_y, batch_l in train_loader:
             batch_x, batch_y = (batch_x.to(device), batch_y.to(device))
             optimizer.zero_grad()
             pred1, pred2, pred3 = model(batch_x, batch_l)
 
-            # 计算每个任务的损失
-            loss1 = _compute_loss(pred1, batch_y[:,1:])
+            # 将标签中的-1替换为0以满足loss的要求
+            valid_batch_y = torch.where(batch_y[:,1:] == -1, torch.zeros_like(batch_y[:,1:]), batch_y[:,1:])  # [B, current_max_L, 1]
+            loss1 = _compute_loss(pred1, valid_batch_y)
             loss2 = _compute_loss(pred2, batch_y[:,:1])
             # loss3 = criterion_task3(out3.squeeze(), batch_y3.squeeze())
-            loss = 0.5 * loss1 + 0.5 * loss2  # 简单加和
+            loss = 0.3 * loss1 + 0.7 * loss2  # 简单加和
+            print(f'Epoch {epoch + 1}/{epochs}, Epoch {iteration}/{train_loader.__len__()}, Train Loss: {loss:.4f}')
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
+            iteration += 1
 
         # 验证
         val_loss = validate_model(model, val_loader, device)
 
-        print(f'Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss / len(train_loader):.4f}, '
+        log_string(log,f'Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss / len(train_loader):.4f}, '
               f'Val Loss: {val_loss / len(val_loader):.4f}')
 
         # 保存最佳模型
@@ -84,58 +90,55 @@ def validate_model(model, val_loader, device):
     val_loss = 0
     with torch.no_grad():
         for batch_x, batch_y, batch_l in val_loader:
-            batch_x, batch_y, batch_l = (batch_x.to(device), batch_y.to(device), batch_l.to(device))
-            pred1, pred2, pred3 = model(batch_x, batch_l)
+            batch_x, batch_y = (batch_x.to(device), batch_y.to(device))
+            pred1, pred2, pred3 = model(batch_x, batch_l) # pred1是路段时间，pred2是路线时间
 
             # 计算每个任务的损失
-            loss1 = _compute_loss(pred1, batch_y[:,1:])
+            # 将标签中的-1替换为0以满足loss的要求
+            valid_batch_y = torch.where(batch_y[:,1:] == -1, torch.zeros_like(batch_y[:,1:]), batch_y[:,1:])  # [B, current_max_L, 1]
+            loss1 = _compute_loss(pred1, valid_batch_y)
             loss2 = _compute_loss(pred2, batch_y[:,:1])
             # loss3 = criterion_task3(out3.squeeze(), batch_y3.squeeze())
-            loss = 0.5 * loss1 + 0.5 * loss2  # 简单加和
+            loss = 0.3 * loss1 + 0.7 * loss2  # 简单加和
             val_loss += loss.item()
     return val_loss
 
 # 测试函数
-def test_model(model, test_loader, device, load_path='best_model.pth'):
-    model.load_state_dict(torch.load(load_path))
-    model = model.to(device)
+def test_model(model, test_loader, device):
+    model.load_state_dict(torch.load(args.model_file, map_location=torch.device(device), weights_only=False))
+    # model = model.to(device)
     model.eval()
 
-    criterion_task1 = nn.CrossEntropyLoss()
-    criterion_task2 = nn.MSELoss()
-    criterion_task3 = nn.MSELoss()
-    test_loss = 0
-    correct = 0
-    total = 0
-
+    test1_loss = 0
+    test2_loss = 0
+    labels_dict = {i:[] for i in range(max_route)}
+    preds_dict = {i:[] for i in range(max_route)}
     with torch.no_grad():
-        for batch_x, batch_y1, batch_y2, batch_y3 in test_loader:
-            batch_x, batch_y1, batch_y2, batch_y3 = (
-                batch_x.to(device), batch_y1.to(device),
-                batch_y2.to(device), batch_y3.to(device)
-            )
-            out1, out2, out3 = model(batch_x)
+        for batch_x, batch_y, batch_l in test_loader:
+            batch_x, batch_y = (batch_x.to(device), batch_y.to(device))
+            pred1, pred2, pred3 = model(batch_x, batch_l)
+            preds_dict[batch_x.cpu().numpy()[0, 0, 5]].append(np.concatenate((pred2.cpu().numpy(), pred1.cpu().numpy()), axis=1))
+            labels_dict[batch_x.cpu().numpy()[0, 0, 5]].append(batch_y.cpu().numpy())
 
-            # 分类任务准确率
-            _, predicted = torch.max(out1, 1)
-            total += batch_y1.size(0)
-            correct += (predicted == batch_y1).sum().item()
+            # 计算每个任务的损失, 将标签中的-1替换为0以满足loss的要求
+            valid_batch_y = torch.where(batch_y[:,1:] == -1, torch.zeros_like(batch_y[:,1:]), batch_y[:,1:])  # [B, current_max_L, 1]
+            loss1 = _compute_loss(pred1, valid_batch_y) # 路段
+            loss2 = _compute_loss(pred2, batch_y[:,:1]) # 路线
+            # loss3 = criterion_task3(out3.squeeze(), batch_y3.squeeze())
+            test1_loss += loss1.item()
+            test2_loss += loss2.item()
 
-            # 计算损失
-            loss1 = criterion_task1(out1, batch_y1)
-            loss2 = criterion_task2(out2.squeeze(), batch_y2.squeeze())
-            loss3 = criterion_task3(out3.squeeze(), batch_y3.squeeze())
-            loss = loss1 + loss2 + loss3
-            test_loss += loss.item()
-
-    accuracy = correct / total
-    print(f'Test Loss: {test_loss / len(test_loader):.4f}, Task 1 Accuracy: {accuracy:.4f}')
+    for i in range(len(labels_dict)):
+        preds_dict[i] = np.array(preds_dict[i], dtype=np.float32)
+        labels_dict[i] = np.array(labels_dict[i], dtype=np.float32)
+        np.savez_compressed('data/results/DMTLN-' + str(i) + '-YINCHUAN', **{'prediction': preds_dict[i], 'truth': labels_dict[i]})
+    print(f'Test1 Loss: {test1_loss / len(test_loader):.4f}, Task 2 Loss: {test2_loss / len(test_loader):.4f}')
 
 
 # 主函数
 def main():
     # 超参数
-    field_dims = [max_city, max_plate, max_v_type, max_dow, max_mod, max_rote]  # 前六个field的取值范围
+    field_dims = [max_city, max_plate, max_v_type, max_dow, max_mod, max_route]  # 前六个field的取值范围
 
     # 初始化模型
     model = DmtlnModel(
@@ -143,16 +146,17 @@ def main():
         num_features= args.num_features,
         embed_size=args.emb_size,
         class_num=args.class_num,
-        max_len = args.max_len
+        max_len = args.max_len,
+        ytra_mean = ytra_mean, ytra_std = ytra_std, ytol_mean = ytol_mean, ytol_std = ytol_std
     )
     parameters = count_parameters(model)
     log_string(log, 'trainable parameters: {:,}'.format(parameters))
 
     # 训练和验证
-    train_model(model, train_loader, val_loader, args.num_epochs, args.lr, device)
+    # train_model(model, val_loader, val_loader, args.num_epochs, args.lr, device, log)
 
     # 测试
-    # test_model(model, test_loader, device)
+    test_model(model, test_loader, device)
 
 
 if __name__ == "__main__":
