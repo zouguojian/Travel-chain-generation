@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import math
-import numpy as np
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -146,7 +145,7 @@ class HolisticAttention(nn.Module):
             x = layer(x, attn_mask, padding_mask)
         # Final normalization
         x = self.norm(x)
-        return x
+        return x # [B, L+2, D]
 
 class SpatiotemporalModel(nn.Module):
     def __init__(self,):
@@ -159,41 +158,42 @@ class MultiTaskModel(nn.Module):
     def __init__(self, in_features, hidden_channels=64):
         super(MultiTaskModel, self).__init__()
 
-        # Task 1: Classification [B, L] with Softmax on L dimension
+        # Task 1: Regression [B, L]
         self.task1 = nn.Sequential(
+            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
+        )
+
+        # Task 2: Regression [B, 1]
+        self.task2 = nn.Sequential(
+            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1),
+        )
+
+        # Task 3: Classification [B, L] with Softmax on L dimension
+        self.task3 = nn.Sequential(
             nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
         )
         self.softmax = nn.Softmax(dim=1)  # Softmax along L dimension
 
-        # Task 2: Regression [B, L, 1]
-        self.task2 = nn.Sequential(
-            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
-        )
+    def forward(self, x1, x2, x3 = None):
+        # x1: [B, L, D], x2: [B, D, 1]
 
-        # Task 3: Regression [B, 1, 1]
-        self.task3 = nn.Sequential(
-            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1),
-        )
-
-    def forward(self, x):
-        # x: [B, L, D]
-        x_perm = x.permute(0, 2, 1)  # [B, D, L]
         # Task 1
-        t1 = self.task1(x_perm)  # [B, 1, L]
-        task1_out = t1.squeeze(1)  # [B, L]
-        task1_out = self.softmax(task1_out)  # [B, L], probabilities sum to 1 along L
+        x_perm = x1.permute(0, 2, 1)  # [B, D, L]
+        task1_out = self.task1(x_perm).squeeze(1)  # [B, 1, L] -> [B, L]
 
         # Task 2
-        task2_out = self.task2(x_perm).permute(0, 2, 1)  # [B, 1, L] -> [B, L, 1]
+        task2_out = self.task2(x2).squeeze(1)  # [B, 1]
 
         # Task 3
-        task3_out = self.task3(x_perm)  # [B, 1, 1]
+        t3 = self.task3(x_perm)  # [B, 1, L]
+        task3_out = t3.squeeze(1)  # [B, L]
+        task3_out = self.softmax(task3_out)  # [B, L], probabilities sum to 1 along L
 
         return task1_out, task2_out, task3_out
 
@@ -261,7 +261,7 @@ class DeepFinModel(nn.Module):
                             range(self.num_cat)]  # list [B, embed_dim, Max_L]
         cont_linear_terms = [self.cont_linears[j](x[:, self.num_cat + j:self.num_cat + j + 1, :])  # [B, embed_dim, Max_L]
                              for j in range(self.num_cont)]
-        print(len(cat_linear_terms), cat_linear_terms[0].shape, len(cont_linear_terms), cont_linear_terms[0].shape)
+
         linear_terms = sum(cat_linear_terms + cont_linear_terms) + self.fin_bias.view(1, -1, 1)  # [B, embed_dim, Max_L]
 
         # DNN 部分
@@ -280,12 +280,15 @@ class DmtlnModel(nn.Module):
     def __init__(self, field_dims,
                  num_features,
                  embed_size = 32,
-                 hidden_size=[64, 32],
                  class_num = 11,
-                 max_len = 12):
+                 max_len = 15, ytra_mean = 0.0, ytra_std = 1.0, ytol_mean =0.0, ytol_std = 1.0):
         super(DmtlnModel, self).__init__()
+        self.ytra_mean = ytra_mean
+        self.ytra_std = ytra_std
+        self.ytol_mean = ytol_mean
+        self.ytol_std = ytol_std
         # 特征交叉网络定义
-        self.finmodel = DeepFinModel(field_dims, num_features, embed_dim=32, hidden_dims=[64, 32], dropout=0.2)
+        self.finmodel = DeepFinModel(field_dims, num_features, embed_dim=embed_size, hidden_dims=[64, embed_size], dropout=0.2)
 
         # 全局注意力定义，这里不使用多头注意力，但是使用了mask和position机制
         self.holisticatt = HolisticAttention(embed_size, 1, 1, embed_size * 2, 0.2, max_len)
@@ -293,13 +296,27 @@ class DmtlnModel(nn.Module):
         # 多任务模块定义
         self.multitask = MultiTaskModel(in_features = embed_size, hidden_channels=64)
 
-    def forward(self, x):
+    def forward(self, x, seq_lengths):
         # x: [batch_size, routes, max_length, num_fields]
         # Generate output
-        batch_size, routes, max_length, num_fields = x.shape
+        routes = 1
+        batch_size, max_length, num_fields = x.shape
         # 重塑为 [batch_size * routes, max_length, num_fields]
         x = x.view(batch_size * routes, max_length, num_fields)
 
         # 经过FIN进行路段级别特征提取
         x = self.finmodel(x) # [batch_size * routes, max_length, num_fields]
-        return x
+
+        x = self.holisticatt(x, seq_lengths)  # [B, L+2, D], [B]
+
+        # Select all valid token representation for travel time on each segment
+        max_len = max(seq_lengths)
+        valid_rep = x[torch.arange(x.size(0)), 1 : max_len + 1] # [B, L, D]
+
+        # Select EOS token representation for total travel time
+        eos_indices = torch.tensor([l + 1 for l in seq_lengths], device=x.device)
+        eos_rep = x[torch.arange(x.size(0)), eos_indices].unsqueeze(-1)  # [B, D]
+
+        results = self.multitask(valid_rep, eos_rep)
+
+        return (results[0] * self.ytra_mean) + self.ytra_std, (results[1] * self.ytol_mean) + self.ytol_std, results[2]
