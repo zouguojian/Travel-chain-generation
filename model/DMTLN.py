@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -276,17 +277,248 @@ class DeepFinModel(nn.Module):
         results = output.permute(0, 2, 1)
         return results  # [B, Max_L, embed_dim]
 
+# Multi-Layer Multi-Head Attention for Spatial
+class CustomMultiHeadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, num_layers=2):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                'wq': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'wk': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'wv': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'wo': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'norm': nn.LayerNorm(embed_dim)
+            }) for _ in range(num_layers)
+        ])
+
+    def forward(self, x, adj=None):
+        batch_size, seq_len, embed_dim = x.shape
+        assert embed_dim == self.embed_dim, f"Expected embed_dim={self.embed_dim}, got {embed_dim}"
+
+        for layer in self.layers:
+            x_in = x.unsqueeze(-1).permute(0, 2, 1, 3)  # [batch_size, embed_dim, seq_len, 1]
+
+            Q = layer['wq'](x_in).permute(0, 2, 3, 1).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [batch_size, num_heads, seq_len, head_dim]
+            K = layer['wk'](x_in).permute(0, 2, 3, 1).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            V = layer['wv'](x_in).permute(0, 2, 3, 1).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+            scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [batch_size, num_heads, seq_len, seq_len]
+
+            if adj is not None:
+                assert adj.shape == (seq_len, seq_len), f"Expected adj shape ({seq_len}, {seq_len}), got {adj.shape}"
+                scores = scores * adj.unsqueeze(0).unsqueeze(0)
+
+            attn = F.softmax(scores, dim=-1)  # [batch_size, num_heads, seq_len, seq_len]
+            out = torch.matmul(attn, V)  # [batch_size, num_heads, seq_len, head_dim]
+            out = out.permute(0, 2, 1, 3).contiguous().view(batch_size, seq_len, embed_dim)  # [batch_size, seq_len, embed_dim]
+
+            out = out.unsqueeze(-1).permute(0, 2, 1, 3)  # [batch_size, embed_dim, seq_len, 1]
+            out = layer['wo'](out).permute(0, 2, 3, 1).squeeze(-2)  # [batch_size, seq_len, embed_dim]
+
+            x = layer['norm'](x + out)  # [batch_size, seq_len, embed_dim]
+
+        return x
+
+# Multi-Layer Temporal Multi-Head Attention
+class CustomTemporalMultiHeadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, num_layers=2):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                'wq': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'wk': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'wv': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'wo': nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+                'norm': nn.LayerNorm(embed_dim)
+            }) for _ in range(num_layers)
+        ])
+
+    def forward(self, x, mask=None):
+        batch_size, seq_len, embed_dim = x.shape
+        assert embed_dim == self.embed_dim, f"Expected embed_dim={self.embed_dim}, got {embed_dim}"
+
+        for layer in self.layers:
+            x_in = x  # [batch_size, seq_len, embed_dim]
+
+            # Reshape for Conv2d: [batch_size, embed_dim, seq_len, 1]
+            x_conv = x_in.unsqueeze(-1).permute(0, 2, 1, 3)  # [batch_size, embed_dim, seq_len, 1]
+
+            Q = layer['wq'](x_conv).permute(0, 2, 3, 1).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # [batch_size, num_heads, seq_len, head_dim]
+            K = layer['wk'](x_conv).permute(0, 2, 3, 1).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            V = layer['wv'](x_conv).permute(0, 2, 3, 1).reshape(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+            scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [batch_size, num_heads, seq_len, seq_len]
+
+            if mask is not None:
+                assert mask.shape == (seq_len, seq_len), f"Expected mask shape ({seq_len}, {seq_len}), got {mask.shape}"
+                extended_mask = mask.unsqueeze(0).unsqueeze(0).expand(batch_size, self.num_heads, -1, -1)
+                scores = scores.masked_fill(extended_mask, float('-inf'))
+
+            attn = F.softmax(scores, dim=-1)  # [batch_size, num_heads, seq_len, seq_len]
+            out = torch.matmul(attn, V)  # [batch_size, num_heads, seq_len, head_dim]
+            out = out.permute(0, 2, 1, 3).contiguous().view(batch_size, seq_len, embed_dim)  # [batch_size, seq_len, embed_dim]
+
+            # Apply output convolution separately
+            out_conv = out.unsqueeze(-1).permute(0, 2, 1, 3)  # [batch_size, embed_dim, seq_len, 1]
+            out = layer['wo'](out_conv).permute(0, 2, 3, 1).squeeze(-2)  # [batch_size, seq_len, embed_dim]
+
+            x = layer['norm'](x_in + out)  # [batch_size, seq_len, embed_dim]
+
+        return x
+
+# Multi-Layer TCN with exponentially increasing dilation
+class SimpleTCN(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, num_layers=3):
+        super().__init__()
+        self.num_layers = num_layers
+        self.kernel_size = kernel_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
+        self.convs = nn.ModuleList([
+            nn.Conv2d(
+                in_channels if i == 0 else out_channels,
+                out_channels,
+                kernel_size=(kernel_size, 1),
+                dilation=(2 ** i, 1),
+                bias=True
+            ) for i in range(num_layers)
+        ])
+
+        self.final_conv = nn.Conv2d(out_channels, out_channels, kernel_size=(1, 1), bias=True)
+
+    def forward(self, x):
+        for i, conv in enumerate(self.convs):
+            dilation = 2 ** i
+            padding = ((self.kernel_size - 1) * dilation, 0)
+            x = F.pad(x, (0, 0, padding[0], 0))
+            x = conv(x)
+            x = F.relu(x)
+
+        x = self.final_conv(x)
+        x = x[:, :, -1:, :]  # [B, D, 1, N]
+        return x
+
+# ST-Block Module with initial embedding and output projection
+class STBlock(nn.Module):
+    def __init__(self, T, N, D_in=1, D_out=32, num_heads=8):
+        super().__init__()
+        self.T = T
+        self.N = N
+        self.D = D_out
+        self.num_heads = num_heads
+
+        # Initial embedding convolutions: D_in=1 to D_out=32
+        self.embedding = nn.Sequential(
+            nn.Conv2d(D_in, 16, kernel_size=1, bias=True),
+            nn.ReLU(),
+            nn.Conv2d(16, D_out, kernel_size=1, bias=True),
+            nn.ReLU()
+        )
+
+        # Temporal Attention
+        self.temporal_attn = CustomTemporalMultiHeadAttention(embed_dim=D_out, num_heads=num_heads, num_layers=2)
+
+        # Spatial Attention
+        self.spatial_attn = CustomMultiHeadAttention(embed_dim=D_out, num_heads=num_heads, num_layers=2)
+
+        # Fusion CNN
+        self.fusion_cnn = nn.Sequential(
+            nn.Conv2d(2 * D_out, D_out, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(D_out, D_out, kernel_size=1)
+        )
+
+        # Gate with 1x1 Conv
+        self.gate_conv1 = nn.Conv2d(2 * D_out, D_out, kernel_size=1)
+        self.gate_conv2 = nn.Conv2d(D_out, D_out, kernel_size=1)
+
+        # TCN
+        self.tcn = SimpleTCN(D_out, D_out, kernel_size=3, num_layers=3)
+
+        # Output projection: D_out=32 to D_in=1
+        self.output_conv = nn.Conv2d(D_out, D_out, kernel_size=1, bias=True)
+
+    def forward(self, x, adj1, adj2):
+        # x shape: [B, T, N, D_in]
+        # adj1 shape: [N, N]
+        # adj2 shape: [N, N]
+        B = x.shape[0]
+        assert x.shape == (B, self.T, self.N, 1), f"Expected input shape ({B}, {self.T}, {self.N}, 1), got {x.shape}"
+
+        # Apply embedding convolutions
+        x = x.permute(0, 3, 1, 2)  # [B, D_in, T, N]
+        x = self.embedding(x)  # [B, D_out, T, N]
+        x = x.permute(0, 2, 3, 1)  # [B, T, N, D_out]
+
+        # Temporal Attention
+        x_temp = x.permute(0, 2, 1, 3).reshape(B * self.N, self.T, self.D)  # [B*N, T, D_out]
+        causal_mask = torch.triu(torch.ones(self.T, self.T), diagonal=1).bool().to(x.device)
+        hdt = self.temporal_attn(x_temp, mask=causal_mask)
+        assert hdt.shape == (B * self.N, self.T, self.D), f"Expected hdt shape ({B * self.N}, {self.T}, {self.D}), got {hdt.shape}"
+        hdt = hdt.view(B, self.N, self.T, self.D).permute(0, 2, 1, 3)  # [B, T, N, D_out]
+
+        # Spatial Attention
+        x_spat = x.permute(0, 1, 2, 3).reshape(B * self.T, self.N, self.D)  # [B*T, N, D_out]
+        hdg = self.spatial_attn(x_spat, adj=adj1)
+        hda = self.spatial_attn(x_spat, adj=adj2)
+        assert hdg.shape == (B * self.T, self.N, self.D), f"Expected hdg shape ({B * self.T}, {self.N}, {self.D}), got {hdg.shape}"
+        assert hda.shape == (B * self.T, self.N, self.D), f"Expected hda shape ({B * self.T}, {self.N}, {self.D}), got {hda.shape}"
+        hdg = hdg.view(B, self.T, self.N, self.D)  # [B, T, N, D_out]
+        hda = hda.view(B, self.T, self.N, self.D)  # [B, T, N, D_out]
+
+        # Multi-Feature Fusion
+        h_concat = torch.cat([hdg, hda], dim=-1)  # [B, T, N, 2*D_out]
+        h_concat = h_concat.permute(0, 3, 1, 2)  # [B, 2*D_out, T, N]
+        hds = self.fusion_cnn(h_concat)  # [B, D_out, T, N]
+        hds = hds.permute(0, 2, 3, 1)  # [B, T, N, D_out]
+
+        # Gate mechanism
+        gate_input = torch.cat([hdt, hds], dim=-1)  # [B, T, N, 2*D_out]
+        gate_input = gate_input.permute(0, 3, 1, 2)  # [B, 2*D_out, T, N]
+        z = torch.sigmoid(self.gate_conv1(gate_input))  # [B, D_out, T, N]
+        z = self.gate_conv2(z)  # [B, D_out, T, N]
+        z = z.permute(0, 2, 3, 1)  # [B, T, N, D_out]
+        hst = z * hdt + (1 - z) * hds  # [B, T, N, D_out]
+
+        # TCN
+        hst_tcn = hst.permute(0, 3, 1, 2)  # [B, D_out, T, N]
+        hsf = self.tcn(hst_tcn)  # [B, D_out, 1, N]
+        hsf = self.output_conv(hsf)  # [B, D_in, 1, N]
+        hsf = hsf.permute(0, 2, 3, 1)  # [B, 1, N, D_in]
+        hsf = hsf.squeeze(1) # [B, N, D_in]
+        return hsf
+
 class DmtlnModel(nn.Module):
     def __init__(self, field_dims,
                  num_features,
                  embed_size = 32,
                  class_num = 11,
+                 N_spped = 106,
+                 N_flow = 66,
                  max_len = 15, ytra_mean = 0.0, ytra_std = 1.0, ytol_mean =0.0, ytol_std = 1.0):
         super(DmtlnModel, self).__init__()
         self.ytra_mean = ytra_mean
         self.ytra_std = ytra_std
         self.ytol_mean = ytol_mean
         self.ytol_std = ytol_std
+
+        # 交通状态网络定义, 包括对路段的速度建模和对站点交通速度建模
+        model_speed = STBlock(T = 12, N = N_spped, D_in = 1, D_out = embed_size, num_heads = 8)
+        model_flow = STBlock(T = 12, N = N_flow, D_in = 1, D_out = embed_size, num_heads = 8)
+
         # 特征交叉网络定义
         self.finmodel = DeepFinModel(field_dims, num_features, embed_dim=embed_size, hidden_dims=[64, embed_size], dropout=0.2)
 
