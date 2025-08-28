@@ -64,8 +64,8 @@ def process_travel_data(args):
     l_data = []
     speed_x_data = []
     flow_x_data = []
-    dow = [] # day of week
-    mod = [] # minute of day
+    dow_data = [] # day of week
+    mod_data = [] # minute of day
     city_dict = dict() # 用于记录城市和索引的字典
     plate_dict = dict() # 用于记录车牌和索引的字典
 
@@ -105,8 +105,8 @@ def process_travel_data(args):
         index = datetime_dic[str(row['rounded_time'])]
         flow_x_data.append(data_flow[index - 12: index, 3:])    # 添加流量数据
         speed_x_data.append(data_speed[index - 12: index, 1:])  # 添加速度数据
-        dow.append(data_flow[index - 12: index, 1:2]) # 添加天信息
-        mod.append(data_flow[index - 12: index, 0:1]) # 添加分钟信息
+        dow_data.append(data_flow[index - 12: index, 1:2]) # 添加天信息
+        mod_data.append(data_flow[index - 12: index, 0:1]) # 添加分钟信息
 
         # 计算day of week（0=周一, 6=周日）
         day_of_week = start_time.weekday() # 第四个整型
@@ -144,8 +144,8 @@ def process_travel_data(args):
     x_data = np.array(x_data, dtype=object)
     flow_x_data = np.array(flow_x_data, dtype=np.float32)
     speed_x_data = np.array(speed_x_data, dtype=np.float32)
-    dow = np.array(dow, dtype=np.int32)
-    mod = np.array(mod, dtype=np.int32)
+    dow_data = np.array(dow_data, dtype=np.int32)
+    mod_data = np.array(mod_data, dtype=np.int32)
     y_data = np.array(y_data, dtype=object)
     l_data = np.array(l_data, dtype=np.int32)
 
@@ -164,8 +164,8 @@ def process_travel_data(args):
         x_data[:num_train],
         flow_x_data[:num_train],
         speed_x_data[:num_train],
-        dow[:num_train],
-        mod[:num_train],
+        dow_data[:num_train],
+        mod_data[:num_train],
         y_data[:num_train],
         l_data[:num_train]
     )
@@ -174,8 +174,8 @@ def process_travel_data(args):
         x_data[num_train: num_train + num_val],
         flow_x_data[num_train: num_train + num_val],
         speed_x_data[num_train: num_train + num_val],
-        dow[num_train: num_train + num_val],
-        mod[num_train: num_train + num_val],
+        dow_data[num_train: num_train + num_val],
+        mod_data[num_train: num_train + num_val],
         y_data[num_train: num_train + num_val],
         l_data[num_train: num_train + num_val]
     )
@@ -184,8 +184,8 @@ def process_travel_data(args):
         x_data[-num_test:],
         flow_x_data[-num_test:],
         speed_x_data[-num_test:],
-        dow_val[-num_test:],
-        mod_val[-num_test:],
+        dow_data[-num_test:],
+        mod_data[-num_test:],
         y_data[-num_test:],
         l_data[-num_test:]
     )
