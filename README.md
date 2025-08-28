@@ -4,6 +4,13 @@ Using traffic flow and travel preference data to generate an individual travel c
 # Data alignment
 To integrate traffic state data with vehicle trajectory data, we performed temporal alignment and data fusion. For each complete trajectory in the trajectory dataset, we used the timestamp at which the vehicle passed the starting gantry to extract historical traffic state data, both speed and flow, for the preceding 12 time slices (equivalent to 1 hour). This process provided dynamic traffic environment characteristics for each trajectory prior to departure, including historical speed distributions across each section and traffic flow conditions at each node. As a result, two aligned traffic state datasets were generated, containing speed and flow information for the 12 time slices preceding each trajectory’s departure.
 
+# Data preprocess
+**Step 1:** Process the flow and speed data, with a temporal granularity of five minutes. The rows correspond to time and traffic state information, while the columns represent attribute names. Please refer to the file *data/states/datapro.py*.
+
+**Step 2:** Load each trajectory record and round down each vehicle’s departure time. For example, “2021-06-01 00:30:04” is rounded down to “2021-06-01 00:30:00,” and “2021-06-01 00:27:46” is rounded down to “2021-06-01 00:25:00.” Please refer to *data/Dataload.py*.
+
+**Step 3:** Match the rounded departure time of the trajectory with the traffic state time to obtain the corresponding historical traffic state values over the previous 12 time steps. This procedure can also be found in *data/Dataload.py*.
+
 # Trajectory structure
 <p align="left"> <img src="https://github.com/zouguojian/Travel-chain-generation/blob/main/data/trajectory%20structure.svg" alt="zouguojian" /> </p>
 
