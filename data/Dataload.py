@@ -109,7 +109,7 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
         del cat_data
 
     total_x = np.concatenate((data['x_' + 'train'], data['x_' + 'val'], data['x_' + 'test']))
-    max_city, max_plate, max_v_type, max_rote = np.max(total_x[:, 0]) + 1, np.max(total_x[:, 1]) + 1, np.max(total_x[:, 2]) + 1, np.max(total_x[:, 5]) + 1
+    max_city, max_plate, max_v_type, max_route = np.max(total_x[:, 0]) + 1, np.max(total_x[:, 1]) + 1, np.max(total_x[:, 2]) + 1, np.max(total_x[:, 5]) + 1
     del total_x
 
     train_dataset = VariableLengthDataset(data['x_train'], data['y_train'], data['l_train'], xdis_mean, xdis_std)
@@ -121,7 +121,7 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=collate_fn)
 
-    return train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std
+    return train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_route, ytra_mean.item(), ytra_std.item(), ytol_mean.item(), ytol_std.item()
 
 
 # train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset('/Users/zouguojian/Travel-chain-generation/data', 32, test_batch_size=1)
