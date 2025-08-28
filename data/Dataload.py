@@ -3,29 +3,6 @@ from torch.utils.data import Dataset, DataLoader
 import os
 import numpy as np
 
-
-# 自定义数据集类，用于处理变长序列数据
-class DeepFMDataset(Dataset):
-    def __init__(self, data_list, labels_list):
-        """
-        初始化数据集，存储变长序列的输入数据和标签。
-
-        参数:
-            data_list: list of [L, D] tensors, where L is the variable sequence length
-                       and D is the feature dimension (num_features).
-            labels_list: list of [L, 1] tensors, containing binary labels (0 or 1).
-        """
-        self.data_list = data_list  # 存储变长输入数据列表
-        self.labels_list = labels_list  # 存储变长标签列表
-
-    def __len__(self):
-        """返回数据集的样本总数"""
-        return len(self.data_list)
-
-    def __getitem__(self, idx):
-        """获取指定索引的样本，返回数据和标签对"""
-        return self.data_list[idx], self.labels_list[idx]
-
 class StandardScaler:
     """
     Standard the input
@@ -42,12 +19,16 @@ class StandardScaler:
         return (data * self.std) + self.mean
 
 class VariableLengthDataset(Dataset):
-    def __init__(self, x, y, l, mean, std):
+    def __init__(self, x, flow, speed, dow, mod, y, l, mean, std):
         # x 表示模型的输入数据 [B, D]
         # y 表示标签 ([B, L], [B, 1])
         # l 表示每个路径的长度 [B, 1]
         # Initialize dataset with variable-length sequences
         self.data = []
+        self.flow_data = []
+        self.speed_data = []
+        self.dow_data = []
+        self.mod_data = []
         self.labels = []
         self.seq_lengths = []
         for i in range(l.shape[0]):
@@ -55,6 +36,11 @@ class VariableLengthDataset(Dataset):
             x_1 = np.array(np.tile(x[i][:-1], (l[i], 1)), dtype=np.float32)
             x_2 = (np.array(np.reshape(x[i][-1], [l[i], 1]), dtype=np.float32) - mean) / std # 归一化
             self.data.append(torch.FloatTensor(np.concatenate((x_1, x_2), axis=1)))
+            self.flow_data.append(torch.FloatTensor(flow[i]))
+            self.speed_data.append(torch.FloatTensor(speed[i]))
+            # print(type(dow[i]), dow[i].shape, type(mod[i]), mod[i].shape)
+            self.dow_data.append(torch.IntTensor(dow[i]))
+            self.mod_data.append(torch.IntTensor(mod[i]))
             self.labels.append(torch.FloatTensor(np.array([y[i][1]] + y[i][0], dtype=np.float32)))
             self.seq_lengths.append(l[i])
 
@@ -64,7 +50,7 @@ class VariableLengthDataset(Dataset):
     def __getitem__(self, idx):
         # Return sequence, label, and sequence length
         # x: [0, 0, 13, 0, 1431, 1, 14388.9, 14828.39], y: [25.567, 11.9, 13.667], l: [2]
-        return self.data[idx], self.labels[idx], self.seq_lengths[idx]
+        return self.data[idx], self.flow_data, self.speed_data, self.dow_data, self.mod_data, self.labels[idx], self.seq_lengths[idx]
 
 
 # 自定义collate_fn，用于动态填充变长序列以形成批次
@@ -101,6 +87,10 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     for category in ['train', 'val', 'test']:
         cat_data = np.load(os.path.join(dataset_dir, category + '.npz'), allow_pickle=True)
         data['x_' + category] = cat_data['x']
+        data['flow_x_' + category] = cat_data['flow_x']
+        data['speed_x_' + category] = cat_data['speed_x']
+        data['dow_' + category] = cat_data['dow']
+        data['mod_' + category] = cat_data['mod']
         data['y_' + category] = cat_data['y']
         data['l_' + category] = cat_data['l']
         xdis_mean, xdis_std = cat_data['xdis_mean'], cat_data['xdis_std']
@@ -112,9 +102,12 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     max_city, max_plate, max_v_type, max_route = np.max(total_x[:, 0]) + 1, np.max(total_x[:, 1]) + 1, np.max(total_x[:, 2]) + 1, np.max(total_x[:, 5]) + 1
     del total_x
 
-    train_dataset = VariableLengthDataset(data['x_train'], data['y_train'], data['l_train'], xdis_mean, xdis_std)
-    val_dataset = VariableLengthDataset(data['x_val'], data['y_val'], data['l_val'], xdis_mean, xdis_std)
-    test_dataset = VariableLengthDataset(data['x_test'], data['y_test'], data['l_test'], xdis_mean, xdis_std)
+    train_dataset = VariableLengthDataset(data['x_train'], data['flow_x_train'], data['speed_x_train'], data['dow_train'], data['mod_train'], data['y_train'], data['l_train'], xdis_mean, xdis_std)
+    print('load train dataset done')
+    val_dataset = VariableLengthDataset(data['x_val'], data['flow_x_val'], data['speed_x_val'], data['dow_val'], data['mod_val'], data['y_val'], data['l_val'], xdis_mean, xdis_std)
+    print('load val dataset done')
+    test_dataset = VariableLengthDataset(data['x_test'], data['flow_x_test'], data['speed_x_test'], data['dow_test'], data['mod_test'], data['y_test'], data['l_test'], xdis_mean, xdis_std)
+    print('load test dataset done')
 
     # Generate synthetic variable-length dataset
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
@@ -124,10 +117,12 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     return train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_route, ytra_mean.item(), ytra_std.item(), ytol_mean.item(), ytol_std.item()
 
 
-# train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset('/Users/zouguojian/Travel-chain-generation/data', 32, test_batch_size=1)
-# for batch_x, batch_y, batch_l in train_loader:
-#     print(batch_x.shape)
-#     print(max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std)
+'''
+train x:  (377803, 7) y: (377803, 2) flow: (377803, 12, 66) speed: (377803, 12, 108) dow: (377803, 12, 1) mod: (377803, 12, 1) l: (377803,)
+'''
+train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset('/Users/zouguojian/Travel-chain-generation/data', 32, test_batch_size=1)
+for batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_l in train_loader:
+    print(batch_x.shape, batch_flow.shape, batch_speed.shape, batch_dow.shape, batch_mod.shape, batch_y.shape, batch_l.shape)
 
 '''
 data = {}
