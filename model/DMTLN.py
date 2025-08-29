@@ -413,10 +413,8 @@ class SimpleTCN(nn.Module):
 
 # ST-Block Module with initial embedding and output projection
 class STBlock(nn.Module):
-    def __init__(self, T, N, D_in=1, D_out=32, num_heads=8):
+    def __init__(self, D_in=1, D_out=32, num_heads=8):
         super().__init__()
-        self.T = T
-        self.N = N
         self.D = D_out
         self.num_heads = num_heads
 
@@ -451,12 +449,9 @@ class STBlock(nn.Module):
         # Output projection: D_out=32 to D_in=1
         self.output_conv = nn.Conv2d(D_out, D_out, kernel_size=1, bias=True)
 
-    def forward(self, x, adj1, adj2):
-        # x shape: [B, T, N, D_in]
-        # adj1 shape: [N, N]
-        # adj2 shape: [N, N]
+    def forward(self, x, adj1, adj2, T, N):
         B = x.shape[0]
-        assert x.shape == (B, self.T, self.N, 1), f"Expected input shape ({B}, {self.T}, {self.N}, 1), got {x.shape}"
+        assert x.shape == (B, T, N, 1), f"Expected input shape ({B}, {T}, {N}, 1), got {x.shape}"
 
         # Apply embedding convolutions
         x = x.permute(0, 3, 1, 2)  # [B, D_in, T, N]
@@ -464,20 +459,20 @@ class STBlock(nn.Module):
         x = x.permute(0, 2, 3, 1)  # [B, T, N, D_out]
 
         # Temporal Attention
-        x_temp = x.permute(0, 2, 1, 3).reshape(B * self.N, self.T, self.D)  # [B*N, T, D_out]
-        causal_mask = torch.triu(torch.ones(self.T, self.T), diagonal=1).bool().to(x.device)
+        x_temp = x.permute(0, 2, 1, 3).reshape(B * N, T, self.D)  # [B*N, T, D_out]
+        causal_mask = torch.triu(torch.ones(T, T), diagonal=1).bool().to(x.device)
         hdt = self.temporal_attn(x_temp, mask=causal_mask)
-        assert hdt.shape == (B * self.N, self.T, self.D), f"Expected hdt shape ({B * self.N}, {self.T}, {self.D}), got {hdt.shape}"
-        hdt = hdt.view(B, self.N, self.T, self.D).permute(0, 2, 1, 3)  # [B, T, N, D_out]
+        assert hdt.shape == (B * N, T, self.D), f"Expected hdt shape ({B * N}, {T}, {self.D}), got {hdt.shape}"
+        hdt = hdt.view(B, N, T, self.D).permute(0, 2, 1, 3)  # [B, T, N, D_out]
 
         # Spatial Attention
-        x_spat = x.permute(0, 1, 2, 3).reshape(B * self.T, self.N, self.D)  # [B*T, N, D_out]
+        x_spat = x.permute(0, 1, 2, 3).reshape(B * T, N, self.D)  # [B*T, N, D_out]
         hdg = self.spatial_attn(x_spat, adj=adj1)
         hda = self.spatial_attn(x_spat, adj=adj2)
-        assert hdg.shape == (B * self.T, self.N, self.D), f"Expected hdg shape ({B * self.T}, {self.N}, {self.D}), got {hdg.shape}"
-        assert hda.shape == (B * self.T, self.N, self.D), f"Expected hda shape ({B * self.T}, {self.N}, {self.D}), got {hda.shape}"
-        hdg = hdg.view(B, self.T, self.N, self.D)  # [B, T, N, D_out]
-        hda = hda.view(B, self.T, self.N, self.D)  # [B, T, N, D_out]
+        assert hdg.shape == (B * T, N, self.D), f"Expected hdg shape ({B * T}, {N}, {self.D}), got {hdg.shape}"
+        assert hda.shape == (B * T, N, self.D), f"Expected hda shape ({B * T}, {N}, {self.D}), got {hda.shape}"
+        hdg = hdg.view(B, T, N, self.D)  # [B, T, N, D_out]
+        hda = hda.view(B, T, N, self.D)  # [B, T, N, D_out]
 
         # Multi-Feature Fusion
         h_concat = torch.cat([hdg, hda], dim=-1)  # [B, T, N, 2*D_out]
@@ -498,8 +493,37 @@ class STBlock(nn.Module):
         hsf = self.tcn(hst_tcn)  # [B, D_out, 1, N]
         hsf = self.output_conv(hsf)  # [B, D_in, 1, N]
         hsf = hsf.permute(0, 2, 3, 1)  # [B, 1, N, D_in]
-        hsf = hsf.squeeze(1) # [B, N, D_in]
+        hsf = hsf.squeeze(1)  # [B, N, D_in]
         return hsf
+
+
+# Define the fusion module
+class FlowSpeedFusion(nn.Module):
+    def __init__(self, D, hidden_dim = 32):
+        super(FlowSpeedFusion, self).__init__()
+        self.conv1 = nn.Conv2d(3 * D, hidden_dim, kernel_size=1)
+        self.conv2 = nn.Conv2d(hidden_dim, D, kernel_size=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, XS, XF, in_stations, out_stations):
+        # XS: [B, T, 108, D]
+        # XF: [B, T, 66, D]
+        # Gather start and end flows
+        start_flow = XF[:, :, in_stations, :]  # [B, T, 108, D]
+        end_flow = XF[:, :, out_stations, :]  # [B, T, 108, D]
+
+        # Concatenate: [start_flow, XS, end_flow]
+        XSF = torch.cat([start_flow, XS, end_flow], dim=-1)  # [B, T, 108, 3*D]
+
+        # Apply two convolution layers (pointwise)
+        B, T, N, F = XSF.shape
+        x = XSF.permute(0, 3, 1, 2)  # [B, 3*D, T, N]
+        x = self.conv1(x)  # [B, hidden_dim, T, N]
+        x = self.relu(x)
+        x = self.conv2(x)  # [B, D, T, N]
+        X = x.permute(0, 2, 3, 1)  # [B, T, N, D]
+
+        return X
 
 class DmtlnModel(nn.Module):
     def __init__(self, field_dims,
@@ -516,8 +540,9 @@ class DmtlnModel(nn.Module):
         self.ytol_std = ytol_std
 
         # 交通状态网络定义, 包括对路段的速度建模和对站点交通速度建模
-        model_speed = STBlock(T = 12, N = N_spped, D_in = 1, D_out = embed_size, num_heads = 8)
-        model_flow = STBlock(T = 12, N = N_flow, D_in = 1, D_out = embed_size, num_heads = 8)
+        self.statemodel = STBlock(D_in = 1, D_out = embed_size, num_heads = 8)
+        # 交通状态融合模块, 速度与流量融合
+        self.flowspeedfusion = FlowSpeedFusion(D= 3 * embed_size, hidden_dim = embed_size)
 
         # 特征交叉网络定义
         self.finmodel = DeepFinModel(field_dims, num_features, embed_dim=embed_size, hidden_dims=[64, embed_size], dropout=0.2)
