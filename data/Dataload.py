@@ -50,7 +50,7 @@ class VariableLengthDataset(Dataset):
     def __getitem__(self, idx):
         # Return sequence, label, and sequence length
         # x: [0, 0, 13, 0, 1431, 1, 14388.9, 14828.39], y: [25.567, 11.9, 13.667], l: [2]
-        return self.data[idx], self.flow_data, self.speed_data, self.dow_data, self.mod_data, self.labels[idx], self.seq_lengths[idx]
+        return self.data[idx], self.flow_data[idx], self.speed_data[idx], self.dow_data[idx], self.mod_data[idx], self.labels[idx], self.seq_lengths[idx]
 
 
 # 自定义collate_fn，用于动态填充变长序列以形成批次
@@ -69,16 +69,24 @@ def collate_fn(batch):
     # Input: batch (list of (sequence, label, seq_length))
     # Output: padded_data [B, max_len, D], labels [B], seq_lengths (list)
 
-    data, labels, seq_lengths = zip(*batch)  # 分离数据: [B, 6 + L]、标签: [B, 1 + L]、长度: [B]
+    data, flow, speed, dow, mod, labels, seq_lengths = zip(*batch)  # 分离数据: [B, 6 + L]、标签: [B, 1 + L]、长度: [B]
     max_l = max(seq_lengths)  # 批次中的最大序列长度
     # 初始化填充张量，数据用0填充，标签用-1填充以标记无效位置
     padded_x = torch.zeros(len(batch), max_l, data[0].shape[1]) # [B, max_l, 6 + 1]
     padded_y = torch.ones(len(batch), max_l + 1) * -1  # -1表示填充位置 [B, 1 + max_l]
+    padded_flow = torch.zeros(len(batch), flow[0].shape[0], flow[0].shape[1])
+    padded_speed = torch.zeros(len(batch), speed[0].shape[0], speed[0].shape[1])
+    padded_dow = torch.zeros(len(batch), dow[0].shape[0], dow[0].shape[1])
+    padded_mod = torch.zeros(len(batch), mod[0].shape[0], mod[0].shape[1])
     # 将每个样本填充到最大长度
     for i in range(len(batch)):
         padded_x[i, :seq_lengths[i]] = data[i]
         padded_y[i, :seq_lengths[i] + 1] = labels[i]
-    return padded_x, padded_y, seq_lengths
+        padded_flow[i] = flow[i]
+        padded_speed[i] = speed[i]
+        padded_dow[i] = dow[i]
+        padded_mod[i] = mod[i]
+    return padded_x, padded_flow, padded_speed, padded_dow, padded_mod, padded_y, seq_lengths
 
 def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     data = {}
@@ -115,14 +123,22 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     test_loader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=collate_fn)
 
     return train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_route, ytra_mean.item(), ytra_std.item(), ytol_mean.item(), ytol_std.item()
+    ''' 
+    # for train_loader
+    torch.Size([32, 6, 7]) torch.Size([32, 12, 66]) torch.Size([32, 12, 108]) torch.Size([32, 12, 1]) torch.Size([32, 12, 1]) torch.Size([32, 7])
+    '''
 
 
 '''
 train x:  (377803, 7) y: (377803, 2) flow: (377803, 12, 66) speed: (377803, 12, 108) dow: (377803, 12, 1) mod: (377803, 12, 1) l: (377803,)
 '''
-train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset('/Users/zouguojian/Travel-chain-generation/data', 32, test_batch_size=1)
-for batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_l in train_loader:
-    print(batch_x.shape, batch_flow.shape, batch_speed.shape, batch_dow.shape, batch_mod.shape, batch_y.shape, batch_l.shape)
+
+# train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset('/Users/zouguojian/Travel-chain-generation/data', 32, test_batch_size=1)
+# for batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_l in train_loader:
+#     print(batch_x.shape, batch_flow.shape, batch_speed.shape, batch_dow.shape, batch_mod.shape, batch_y.shape)
+'''
+torch.Size([32, 6, 7]) torch.Size([32, 12, 66]) torch.Size([32, 12, 108]) torch.Size([32, 12, 1]) torch.Size([32, 12, 1]) torch.Size([32, 7])
+'''
 
 '''
 data = {}
