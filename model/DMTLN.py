@@ -205,8 +205,8 @@ class DeepFinModel(nn.Module):
         self.field_dims = field_dims  # 类别特征的field_dims
         self.num_cat = len(field_dims) # 类别特征占用的长度
         self.num_cont = num_features - self.num_cat # 浮点型特征占用的长度
-        self.embed_dim = embed_dim
-        self.total_fields = self.num_cat + self.num_cont
+        self.embed_dim = embed_dim  # 嵌入的维度
+        self.total_fields = num_features # 总特征长度
 
         # 嵌入层 for FIN and DNN
         self.cat_embeds = nn.ModuleList([nn.Embedding(fd, embed_dim) for fd in field_dims])
@@ -553,7 +553,7 @@ class DmtlnModel(nn.Module):
         # 多任务模块定义
         self.multitask = MultiTaskModel(in_features = embed_size, hidden_channels=64)
 
-    def forward(self, x, seq_lengths):
+    def forward(self, x, seq_lengths, adjs = []):
         # x: [batch_size, routes, max_length, num_fields]
         # Generate output
         routes = 1
