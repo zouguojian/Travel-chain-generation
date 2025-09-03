@@ -2,27 +2,46 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import os
 import numpy as np
+import pandas as pd
 
-class StandardScaler:
-    """
-    Standard the input
-    """
+def load_adjs(geo_adj_fil = 'states/geo_flow_adj.npz', sem_adj_fil = 'states/sem_flow_adj.npz', device = 'cpu'):
+    # 返回torch类型的张量
+    geo_adj = np.load(geo_adj_fil, allow_pickle=True)['data']
+    # adj_fil邻接矩阵的位置
+    geo_adj = torch.from_numpy(geo_adj).to(device=device)
 
-    def __init__(self, mean, std):
-        self.mean = mean
-        self.std = std
+    sem_adj = np.load(sem_adj_fil, allow_pickle=True)['data']
+    sem_adj = torch.from_numpy(sem_adj).to(device=device)
 
-    def transform(self, data):
-        return (data - self.mean) / self.std
+    return geo_adj, sem_adj
 
-    def inverse_transform(self, data):
-        return (data * self.std) + self.mean
+def load_segment_index(segment_indx_fil = 'path_segment_ids.csv'):
+    '''
+        [array([80], dtype=int32) array([28, 30], dtype=int32)]
+    '''
+    df = pd.read_csv(segment_indx_fil, encoding='utf-8')
+    lengths = df['Length']
+    segment_indexs = [item[:lengths[i]].astype(np.int32) for i, item in enumerate(df.values[:, 2:])]
+    segment_indexs = np.array(segment_indexs, dtype=object)
+    return segment_indexs
+
+def load_segment_distance(segment_dis_fil = 'states/road_segments_with_distance.csv'):
+    '''
+        [array([1.25489839]) array([1.41415507, 1.49492749])]
+    '''
+    segment_indexs = load_segment_index()
+    dis = pd.read_csv(segment_dis_fil, usecols=['distance']).values.reshape(-1)
+    mean, std = np.mean(dis), np.std(dis)
+    dis = np.array([(dis[item] - mean) / std for item in segment_indexs], dtype=object)
+    return dis
 
 class VariableLengthDataset(Dataset):
     def __init__(self, x, flow, speed, dow, mod, y, l, mean, std):
         # x 表示模型的输入数据 [B, D]
         # y 表示标签 ([B, L], [B, 1])
         # l 表示每个路径的长度 [B, 1]
+        # speed流量数据 [B, T, N, 1]
+        # flow流量数据 [B, T, N, 1]
         # Initialize dataset with variable-length sequences
         self.data = []
         self.flow_data = []
