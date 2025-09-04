@@ -28,6 +28,12 @@ def generate_square_subsequent_mask(sz, device):
     # Generate causal (subsequent) mask for self-attention to prevent attending to future tokens
     # Input: sz (sequence length), device
     # Output: mask [sz, sz] where upper triangle is -inf, lower triangle and diagonal are 0
+    '''
+    [[0., -inf, -inf, -inf],
+     [0., 0., -inf, -inf],
+     [0., 0., 0., -inf],
+     [0., 0., 0., 0.]]
+    '''
     mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
     return mask.to(device)
@@ -411,6 +417,40 @@ class SimpleTCN(nn.Module):
         x = x[:, :, -1:, :]  # [B, D, 1, N]
         return x
 
+class STEmbedding(nn.Module):
+    '''
+    spatio-temporal embedding
+    TE:     [batch_size, num_his, 2] (dayofweek, timeofday)
+    T:      num of time steps in one day
+    D:      output dims
+    retrun: [batch_size, num_his, num_vertex, D]
+    '''
+
+    def __init__(self, D_in, D_out, N_1, N_2 = 7, N_3 = 288):
+        # N_1表示路段数, N_2表示监测站点数量, N_2表示一周多少天, N_3表示一天多少分钟数
+        super(STEmbedding, self).__init__()
+        self.SE_emd = nn.Embedding(N_1, D_out)
+        self.DOW_emd = nn.Embedding(N_2, D_out)
+        self.MOD_emd = nn.Embedding(N_3, D_out)
+        self.FC = nn.Sequential(
+            nn.Conv2d(D_in, D_out, kernel_size=1, bias=True),
+            nn.ReLU(),
+            nn.Conv2d(D_out, D_out, kernel_size=1, bias=True),
+        )
+
+    def forward(self, SE, TE, T=288):
+        # SE输入, 时间dow和mod输入分别为 [B, T, 1]
+        # TE输入为[1, N]
+        # 输出为 [B, T, N, D]
+        # spatial embedding
+        SE = self.SE_emd(SE).unsqueeze(0).unsqueeze(0) # [1, N]
+        # temporal embedding
+        DOWE = self.DOW_emd(TE[:, 0]).unsqueeze(0)
+        MODE = self.MOD_emd(TE[:, 1]).unsqueeze(0)
+        TE = torch.cat((DOWE, MODE), dim=-1)
+        TE = self.FC(TE)
+        return SE + TE
+
 # ST-Block Module with initial embedding and output projection
 class STBlock(nn.Module):
     def __init__(self, D_in=1, D_out=32, num_heads=8):
@@ -419,11 +459,10 @@ class STBlock(nn.Module):
         self.num_heads = num_heads
 
         # Initial embedding convolutions: D_in=1 to D_out=32
-        self.embedding = nn.Sequential(
+        self.init_emb = nn.Sequential(
             nn.Conv2d(D_in, 16, kernel_size=1, bias=True),
             nn.ReLU(),
-            nn.Conv2d(16, D_out, kernel_size=1, bias=True),
-            nn.ReLU()
+            nn.Conv2d(16, D_out, kernel_size=1, bias=True)
         )
 
         # Temporal Attention
@@ -449,13 +488,14 @@ class STBlock(nn.Module):
         # Output projection: D_out=32 to D_in=1
         self.output_conv = nn.Conv2d(D_out, D_out, kernel_size=1, bias=True)
 
-    def forward(self, x, adj1, adj2, T, N):
-        B = x.shape[0]
-        assert x.shape == (B, T, N, 1), f"Expected input shape ({B}, {T}, {N}, 1), got {x.shape}"
+    def forward(self, x, adj1, adj2):
+        # X输入为 [B, T, N, 1]
+        # 时间dow和mod输入 [B, T, 1]
+        B, T, N, _ = x.shape
 
         # Apply embedding convolutions
         x = x.permute(0, 3, 1, 2)  # [B, D_in, T, N]
-        x = self.embedding(x)  # [B, D_out, T, N]
+        x = self.init_emb(x)       # [B, D_out, T, N]
         x = x.permute(0, 2, 3, 1)  # [B, T, N, D_out]
 
         # Temporal Attention
@@ -493,7 +533,7 @@ class STBlock(nn.Module):
         hsf = self.tcn(hst_tcn)  # [B, D_out, 1, N]
         hsf = self.output_conv(hsf)  # [B, D_in, 1, N]
         hsf = hsf.permute(0, 2, 3, 1)  # [B, 1, N, D_in]
-        hsf = hsf.squeeze(1)  # [B, N, D_in]
+        # hsf = hsf.squeeze(1)  # [B, N, D_in]
         return hsf
 
 
@@ -502,15 +542,15 @@ class FlowSpeedFusion(nn.Module):
     def __init__(self, D, hidden_dim = 32):
         super(FlowSpeedFusion, self).__init__()
         self.conv1 = nn.Conv2d(3 * D, hidden_dim, kernel_size=1)
-        self.conv2 = nn.Conv2d(hidden_dim, D, kernel_size=1)
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1)
         self.relu = nn.ReLU()
 
     def forward(self, XS, XF, in_stations, out_stations):
         # XS: [B, T, 108, D]
         # XF: [B, T, 66, D]
         # Gather start and end flows
-        start_flow = XF[:, :, in_stations, :]  # [B, T, 108, D]
-        end_flow = XF[:, :, out_stations, :]  # [B, T, 108, D]
+        start_flow = XF[:, :, in_stations]  # [B, T, 108, D]
+        end_flow = XF[:, :, out_stations]  # [B, T, 108, D]
 
         # Concatenate: [start_flow, XS, end_flow]
         XSF = torch.cat([start_flow, XS, end_flow], dim=-1)  # [B, T, 108, 3*D]
@@ -520,8 +560,8 @@ class FlowSpeedFusion(nn.Module):
         x = XSF.permute(0, 3, 1, 2)  # [B, 3*D, T, N]
         x = self.conv1(x)  # [B, hidden_dim, T, N]
         x = self.relu(x)
-        x = self.conv2(x)  # [B, D, T, N]
-        X = x.permute(0, 2, 3, 1)  # [B, T, N, D]
+        x = self.conv2(x)  # [B, hidden_dim, T, N]
+        X = x.permute(0, 2, 3, 1)  # [B, T, N, hidden_dim]
 
         return X
 
@@ -542,7 +582,7 @@ class DmtlnModel(nn.Module):
         # 交通状态网络定义, 包括对路段的速度建模和对站点交通速度建模
         self.statemodel = STBlock(D_in = 1, D_out = embed_size, num_heads = 8)
         # 交通状态融合模块, 速度与流量融合
-        self.flowspeedfusion = FlowSpeedFusion(D= 3 * embed_size, hidden_dim = embed_size)
+        self.flowspeedfusion = FlowSpeedFusion(D = embed_size, hidden_dim = embed_size)
 
         # 特征交叉网络定义
         self.finmodel = DeepFinModel(field_dims, num_features, embed_dim=embed_size, hidden_dims=[64, embed_size], dropout=0.2)
@@ -553,18 +593,28 @@ class DmtlnModel(nn.Module):
         # 多任务模块定义
         self.multitask = MultiTaskModel(in_features = embed_size, hidden_channels=64)
 
-    def forward(self, x, seq_lengths, adjs = []):
+    def forward(self, x, x_flow, x_speed, batch_dow, batch_mod, batch_cla, seq_lengths, df, adjs = []):
         # x: [batch_size, routes, max_length, num_fields]
         # Generate output
-        routes = 1
-        batch_size, max_length, num_fields = x.shape
+        # print('x shape', x.shape, 'batch_flow shape', batch_flow.shape, 'batch_speed shape', batch_speed.shape, 'batch_dow shape', batch_dow.shape, 'batch_mod shape', batch_mod.shape, 'batch_cla shape', batch_cla.shape)
+        batch_size, routes, max_length, num_fields = x.shape
         # 重塑为 [batch_size * routes, max_length, num_fields]
         x = x.view(batch_size * routes, max_length, num_fields)
 
+        x_flow, x_speed = x_flow.unsqueeze(3), x_speed.unsqueeze(3) # [B, T, N, 1]
+        xf = self.statemodel(x_flow, adj1 = adjs[0], adj2 = adjs[1])   # [B, 1, 66, D]
+        xs = self.statemodel(x_speed, adj1 = adjs[2], adj2 = adjs[3])  # [B, 1, 108, D]
+        # Extract in_station and out_station as tensors
+        in_stations = torch.tensor(df['in_station'].values, dtype=torch.int32, device=x.device)
+        out_stations = torch.tensor(df['out_station'].values, dtype=torch.int32, device=x.device)
+        xst = self.flowspeedfusion(XS = xs, XF = xf, in_stations = in_stations, out_stations = out_stations) # [B, 1, 108, D]
+
         # 经过FIN进行路段级别特征提取
         x = self.finmodel(x) # [batch_size * routes, max_length, num_fields]
-
-        x = self.holisticatt(x, seq_lengths)  # [B, L+2, D], [B]
+        # print('finmodel output shape', x.shape)
+        _, new_length, new_dim = x.shape
+        x = x.view(batch_size, routes, new_length, new_dim)[torch.arange(batch_size), batch_cla.view(batch_size)]
+        x = self.holisticatt(x, seq_lengths)  # [batch_size, L+2, D], [B]
 
         # Select all valid token representation for travel time on each segment
         max_len = max(seq_lengths)
