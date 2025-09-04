@@ -4,18 +4,19 @@ import os
 import numpy as np
 import pandas as pd
 
-def load_adjs(geo_adj_fil = 'states/geo_flow_adj.npz', sem_adj_fil = 'states/sem_flow_adj.npz', device = 'cpu'):
+# 地理邻接矩阵和语义邻接矩阵
+def load_adjs(geo_adj_fil = 'data/states/geo_flow_adj.npz', sem_adj_fil = 'data/states/sem_flow_adj.npz', device = 'cpu'):
     # 返回torch类型的张量
     geo_adj = np.load(geo_adj_fil, allow_pickle=True)['data']
-    # adj_fil邻接矩阵的位置
-    geo_adj = torch.from_numpy(geo_adj).to(device=device)
+    geo_adj = torch.from_numpy(np.array(geo_adj, dtype=np.float32)).to(device=device) # 地理空间
 
     sem_adj = np.load(sem_adj_fil, allow_pickle=True)['data']
-    sem_adj = torch.from_numpy(sem_adj).to(device=device)
+    sem_adj = torch.from_numpy(np.array(sem_adj, dtype=np.float32)).to(device=device) # 语义空间
 
     return geo_adj, sem_adj
 
-def load_segment_index(segment_indx_fil = 'path_segment_ids.csv'):
+# 每一条路段的index
+def load_segment_index(segment_indx_fil = 'data/path_segment_ids.csv'):
     '''
         [array([80], dtype=int32) array([28, 30], dtype=int32)]
     '''
@@ -25,15 +26,27 @@ def load_segment_index(segment_indx_fil = 'path_segment_ids.csv'):
     segment_indexs = np.array(segment_indexs, dtype=object)
     return segment_indexs
 
-def load_segment_distance(segment_dis_fil = 'states/road_segments_with_distance.csv'):
+# 每一条路段的的长度
+def load_segment_distance(segment_dis_fil = 'data/states/segment_station_with_distance.csv'):
     '''
         [array([1.25489839]) array([1.41415507, 1.49492749])]
     '''
-    segment_indexs = load_segment_index()
+    segment_indexs = load_segment_index() # 用于获取对应路段的index
     dis = pd.read_csv(segment_dis_fil, usecols=['distance']).values.reshape(-1)
     mean, std = np.mean(dis), np.std(dis)
     dis = np.array([(dis[item] - mean) / std for item in segment_indexs], dtype=object)
-    return dis
+    return dis # 归一化的数值
+
+def X_paded(X):
+    '''
+    # 主要用于填充路线
+    X is list, element is [L, D], L是变化的
+    '''
+    max_l = max(X[i].shape[0] for i in range(len(X)))
+    padded_x = np.zeros((len(X), max_l, X[0].shape[1]), dtype=np.float32)  # [B, max_l, 6 + 1]
+    for i in range(len(X)):
+        padded_x[i, :X[i].shape[0]] = X[i]
+    return padded_x
 
 class VariableLengthDataset(Dataset):
     def __init__(self, x, flow, speed, dow, mod, y, l, mean, std):
@@ -49,18 +62,25 @@ class VariableLengthDataset(Dataset):
         self.dow_data = []
         self.mod_data = []
         self.labels = []
+        self.classification = []
         self.seq_lengths = []
+        dis = load_segment_distance()  # 记录的是每条路线上的路段长度
         for i in range(l.shape[0]):
             # variable sequence length for x and y
-            x_1 = np.array(np.tile(x[i][:-1], (l[i], 1)), dtype=np.float32)
-            x_2 = (np.array(np.reshape(x[i][-1], [l[i], 1]), dtype=np.float32) - mean) / std # 归一化
-            self.data.append(torch.FloatTensor(np.concatenate((x_1, x_2), axis=1)))
+            X = []
+            for j in range(dis.shape[0]):
+                x_1 = np.array(np.tile(x[i][:-1], (dis[j].shape[0], 1)), dtype=np.float32)
+                x_2 = np.array(np.reshape(dis[j], [dis[j].shape[0], 1]), dtype=np.float32)
+                x_3 = np.concatenate((x_1, x_2), axis=1) # [L, D]
+                X.append(x_3)
+            X = X_paded(X) # (R, max_L, D) 填充
+            self.data.append(torch.FloatTensor(X))
             self.flow_data.append(torch.FloatTensor(flow[i]))
             self.speed_data.append(torch.FloatTensor(speed[i]))
-            # print(type(dow[i]), dow[i].shape, type(mod[i]), mod[i].shape)
             self.dow_data.append(torch.IntTensor(dow[i]))
             self.mod_data.append(torch.IntTensor(mod[i]))
             self.labels.append(torch.FloatTensor(np.array([y[i][1]] + y[i][0], dtype=np.float32)))
+            self.classification.append(torch.IntTensor(np.array([x[i][5]], dtype=np.int32))) # 路径, 代表类型
             self.seq_lengths.append(l[i])
 
     def __len__(self):
@@ -69,7 +89,7 @@ class VariableLengthDataset(Dataset):
     def __getitem__(self, idx):
         # Return sequence, label, and sequence length
         # x: [0, 0, 13, 0, 1431, 1, 14388.9, 14828.39], y: [25.567, 11.9, 13.667], l: [2]
-        return self.data[idx], self.flow_data[idx], self.speed_data[idx], self.dow_data[idx], self.mod_data[idx], self.labels[idx], self.seq_lengths[idx]
+        return self.data[idx], self.flow_data[idx], self.speed_data[idx], self.dow_data[idx], self.mod_data[idx], self.labels[idx], self.classification[idx], self.seq_lengths[idx]
 
 
 # 自定义collate_fn，用于动态填充变长序列以形成批次
@@ -88,24 +108,26 @@ def collate_fn(batch):
     # Input: batch (list of (sequence, label, seq_length))
     # Output: padded_data [B, max_len, D], labels [B], seq_lengths (list)
 
-    data, flow, speed, dow, mod, labels, seq_lengths = zip(*batch)  # 分离数据: [B, 6 + L]、标签: [B, 1 + L]、长度: [B]
+    data, flow, speed, dow, mod, labels, classification, seq_lengths = zip(*batch)  # 分离数据: [B, R, L, D]、标签: [B, 1 + L]、长度: [B]
     max_l = max(seq_lengths)  # 批次中的最大序列长度
     # 初始化填充张量，数据用0填充，标签用-1填充以标记无效位置
-    padded_x = torch.zeros(len(batch), max_l, data[0].shape[1]) # [B, max_l, 6 + 1]
+    padded_x = torch.zeros(len(batch), data[0].shape[0], data[0].shape[1], data[0].shape[2]) # [B, R, max_l, 6 + 1]
     padded_y = torch.ones(len(batch), max_l + 1) * -1  # -1表示填充位置 [B, 1 + max_l]
+    padded_classification = torch.zeros(len(batch), 1, dtype=torch.int32)
     padded_flow = torch.zeros(len(batch), flow[0].shape[0], flow[0].shape[1])
     padded_speed = torch.zeros(len(batch), speed[0].shape[0], speed[0].shape[1])
     padded_dow = torch.zeros(len(batch), dow[0].shape[0], dow[0].shape[1])
     padded_mod = torch.zeros(len(batch), mod[0].shape[0], mod[0].shape[1])
     # 将每个样本填充到最大长度
     for i in range(len(batch)):
-        padded_x[i, :seq_lengths[i]] = data[i]
+        padded_x[i] = data[i]
         padded_y[i, :seq_lengths[i] + 1] = labels[i]
+        padded_classification[i] = classification[i]
         padded_flow[i] = flow[i]
         padded_speed[i] = speed[i]
         padded_dow[i] = dow[i]
         padded_mod[i] = mod[i]
-    return padded_x, padded_flow, padded_speed, padded_dow, padded_mod, padded_y, seq_lengths
+    return padded_x, padded_flow, padded_speed, padded_dow, padded_mod, padded_y, padded_classification, seq_lengths
 
 def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     data = {}
@@ -147,16 +169,11 @@ def load_dataset(dataset_dir, batch_size, test_batch_size=None, **kwargs):
     torch.Size([32, 6, 7]) torch.Size([32, 12, 66]) torch.Size([32, 12, 108]) torch.Size([32, 12, 1]) torch.Size([32, 12, 1]) torch.Size([32, 7])
     '''
 
-
-'''
-train x:  (377803, 7) y: (377803, 2) flow: (377803, 12, 66) speed: (377803, 12, 108) dow: (377803, 12, 1) mod: (377803, 12, 1) l: (377803,)
-'''
-
 # train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, max_rote, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset('/Users/zouguojian/Travel-chain-generation/data', 32, test_batch_size=1)
-# for batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_l in train_loader:
-#     print(batch_x.shape, batch_flow.shape, batch_speed.shape, batch_dow.shape, batch_mod.shape, batch_y.shape)
+# for batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_cla, batch_l in train_loader:
+#     print(batch_x.shape, batch_flow.shape, batch_speed.shape, batch_dow.shape, batch_mod.shape, batch_y.shape, batch_cla.shape)
 '''
-torch.Size([32, 6, 7]) torch.Size([32, 12, 66]) torch.Size([32, 12, 108]) torch.Size([32, 12, 1]) torch.Size([32, 12, 1]) torch.Size([32, 7])
+torch.Size([32, 10, 8, 7]) torch.Size([32, 12, 66]) torch.Size([32, 12, 108]) torch.Size([32, 12, 1]) torch.Size([32, 12, 1]) torch.Size([32, 7]) torch.Size([32, 1])
 '''
 
 '''
