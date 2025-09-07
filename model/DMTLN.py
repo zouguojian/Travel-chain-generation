@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
+from data.Dataload import load_segment_index
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -121,8 +122,8 @@ class HolisticAttention(nn.Module):
         super().__init__()
         self.d_model = d_model
         # Learnable BOS and EOS tokens
-        self.bos = nn.Parameter(torch.randn(1, 1, d_model))
-        self.eos = nn.Parameter(torch.randn(1, 1, d_model))
+        # self.bos = nn.Parameter(torch.randn(1, 1, d_model))
+        # self.eos = nn.Parameter(torch.randn(1, 1, d_model))
         self.pos_enc = PositionalEncoding(d_model, max_len)
         # Stack multiple transformer layers
         self.layers = nn.ModuleList([
@@ -135,9 +136,9 @@ class HolisticAttention(nn.Module):
         # Input: x [B, L, D], seq_lengths (list of sequence lengths)
         # Output: [B, L+2, D]
         B, L, _ = x.shape
-        # Add BOS and EOS tokens
-        bos = self.bos.repeat(B, 1, 1)
-        eos = self.eos.repeat(B, 1, 1)
+        # Learnable BOS and EOS tokens
+        bos = torch.randn(B, 1, self.d_model, device=x.device)
+        eos = torch.randn(B, 1, self.d_model, device=x.device)
         x = torch.cat([bos, x, eos], dim=1)  # [B, L+2, D]
         # Update sequence lengths for BOS and EOS
         seq_lengths = [l + 2 for l in seq_lengths]
@@ -185,7 +186,7 @@ class MultiTaskModel(nn.Module):
             nn.ReLU(),
             nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
         )
-        self.softmax = nn.Softmax(dim=1)  # Softmax along L dimension
+        # self.softmax = nn.Softmax(dim=1)  # Softmax along L dimension
 
     def forward(self, x1, x2, x3 = None):
         # x1: [B, L, D], x2: [B, D, 1]
@@ -200,7 +201,7 @@ class MultiTaskModel(nn.Module):
         # Task 3
         t3 = self.task3(x_perm)  # [B, 1, L]
         task3_out = t3.squeeze(1)  # [B, L]
-        task3_out = self.softmax(task3_out)  # [B, L], probabilities sum to 1 along L
+        # task3_out = self.softmax(task3_out)  # [B, L], probabilities sum to 1 along L
 
         return task1_out, task2_out, task3_out
 
@@ -212,7 +213,7 @@ class DeepFinModel(nn.Module):
         self.num_cat = len(field_dims) # 类别特征占用的长度
         self.num_cont = num_features - self.num_cat # 浮点型特征占用的长度
         self.embed_dim = embed_dim  # 嵌入的维度
-        self.total_fields = num_features # 总特征长度
+        self.total_fields = num_features + 1 # 总特征长度, 额外的"1"是交通状态
 
         # 嵌入层 for FIN and DNN
         self.cat_embeds = nn.ModuleList([nn.Embedding(fd, embed_dim) for fd in field_dims])
@@ -241,10 +242,12 @@ class DeepFinModel(nn.Module):
             prev_dim = hidden_dim
         self.dnn_output = nn.Conv1d(in_channels=prev_dim, out_channels=embed_dim, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x, states):
         # x shape: [B, Max_L, num_features]
+        # states shape: [B, Max_L, embed_dim]
         # 重塑为 [B, num_features, Max_L] 以适配Conv1d
         x = x.permute(0, 2, 1)  # [B, num_features, Max_L]
+        states = states.permute(0, 2, 1)  # [B, embed_dim, Max_L], 后续加入到路段建模中
 
         # 类别特征嵌入
         cat_emb_list = [self.cat_embeds[i](x[:, i, :].long()).permute(0, 2, 1)  # [B, embed_dim, Max_L]
@@ -255,13 +258,13 @@ class DeepFinModel(nn.Module):
                          for j in range(self.num_cont)]
 
         # 所有嵌入 for FIN interaction
-        all_emb_list = cat_emb_list + cont_emb_list  # list of [B, embed_dim, Max_L]
+        all_emb_list = cat_emb_list + cont_emb_list + [states]  # list of [B, embed_dim, Max_L]
         embed_stacked = torch.stack(all_emb_list, dim=2)  # [B, embed_dim, total_fields, Max_L]
 
         # FIN 二阶交互
-        square_of_sum = torch.sum(embed_stacked, dim=2) ** 2  # [B, embed_dim, Max_L]
-        sum_of_square = torch.sum(embed_stacked ** 2, dim=2)  # [B, embed_dim, Max_L]
-        fin_interaction = 0.5 * (square_of_sum - sum_of_square)  # [B, embed_dim, Max_L]
+        square_of_sum = torch.sum(embed_stacked, dim=2) ** 2  # [B, embed_dim, Max_L + 1]
+        sum_of_square = torch.sum(embed_stacked ** 2, dim=2)  # [B, embed_dim, Max_L + 1]
+        fin_interaction = 0.5 * (square_of_sum - sum_of_square)  # [B, embed_dim, Max_L + 1]
 
         # FIN 线性部分
         cat_linear_terms = [self.cat_linears[i](x[:, i, :].long()).permute(0, 2, 1) for i in
@@ -269,7 +272,7 @@ class DeepFinModel(nn.Module):
         cont_linear_terms = [self.cont_linears[j](x[:, self.num_cat + j:self.num_cat + j + 1, :])  # [B, embed_dim, Max_L]
                              for j in range(self.num_cont)]
 
-        linear_terms = sum(cat_linear_terms + cont_linear_terms) + self.fin_bias.view(1, -1, 1)  # [B, embed_dim, Max_L]
+        linear_terms = sum(cat_linear_terms + cont_linear_terms + [states]) + self.fin_bias.view(1, -1, 1)  # [B, embed_dim, Max_L]
 
         # DNN 部分
         dnn_input = torch.cat(all_emb_list, dim=1)  # [B, total_fields * embed_dim, Max_L]
@@ -565,11 +568,24 @@ class FlowSpeedFusion(nn.Module):
 
         return X
 
+def segment_states_paded(x, indices, max_l):
+    '''
+     x shape: (B, T, N, D)
+     indices: [array([80], dtype=int32), array([28, 30], dtype=int32), ...]
+     return shape: (B, R, L, D)
+    '''
+    B, T, N, D = x.shape
+    padded_x = torch.zeros(B, indices.shape[0], max_l, D, device=x.device)  # [B, R, max_L, D]
+    for i in range(indices.shape[0]):
+        padded_x[:, i, :indices[i].shape[0]] = x[:, -1, indices[i]]
+
+    return padded_x # torch.Size([32, 10, 8, 32]), shape: [B, R, L, D]
+
 class DmtlnModel(nn.Module):
     def __init__(self, field_dims,
                  num_features,
                  embed_size = 32,
-                 class_num = 11,
+                 class_num = 10,
                  N_spped = 106,
                  N_flow = 66,
                  max_len = 15, ytra_mean = 0.0, ytra_std = 1.0, ytol_mean =0.0, ytol_std = 1.0):
@@ -578,9 +594,10 @@ class DmtlnModel(nn.Module):
         self.ytra_std = ytra_std
         self.ytol_mean = ytol_mean
         self.ytol_std = ytol_std
+        self.embed_size = embed_size
 
         # 交通状态网络定义, 包括对路段的速度建模和对站点交通速度建模
-        self.statemodel = STBlock(D_in = 1, D_out = embed_size, num_heads = 8)
+        self.statemodel = STBlock(D_in = 1, D_out = embed_size, num_heads = 4)
         # 交通状态融合模块, 速度与流量融合
         self.flowspeedfusion = FlowSpeedFusion(D = embed_size, hidden_dim = embed_size)
 
@@ -598,6 +615,7 @@ class DmtlnModel(nn.Module):
         # Generate output
         # print('x shape', x.shape, 'batch_flow shape', batch_flow.shape, 'batch_speed shape', batch_speed.shape, 'batch_dow shape', batch_dow.shape, 'batch_mod shape', batch_mod.shape, 'batch_cla shape', batch_cla.shape)
         batch_size, routes, max_length, num_fields = x.shape
+        copy = x
         # 重塑为 [batch_size * routes, max_length, num_fields]
         x = x.view(batch_size * routes, max_length, num_fields)
 
@@ -609,9 +627,11 @@ class DmtlnModel(nn.Module):
         out_stations = torch.tensor(df['out_station'].values, dtype=torch.int32, device=x.device)
         xst = self.flowspeedfusion(XS = xs, XF = xf, in_stations = in_stations, out_stations = out_stations) # [B, 1, 108, D]
 
+        segment_indices = load_segment_index()
+        segment_states = segment_states_paded(xst, segment_indices, max_length)  # [B, R, max_length, D] [32, 10, 8, 32]
+        segment_states = segment_states.view(batch_size * routes, max_length, self.embed_size)  # [batch_size * routes, max_length, D]
         # 经过FIN进行路段级别特征提取
-        x = self.finmodel(x) # [batch_size * routes, max_length, num_fields]
-        # print('finmodel output shape', x.shape)
+        x = self.finmodel(x, segment_states) # [batch_size * routes, max_length, num_fields]
         _, new_length, new_dim = x.shape
         x = x.view(batch_size, routes, new_length, new_dim)[torch.arange(batch_size), batch_cla.view(batch_size)]
         x = self.holisticatt(x, seq_lengths)  # [batch_size, L+2, D], [B]
@@ -626,4 +646,4 @@ class DmtlnModel(nn.Module):
 
         results = self.multitask(valid_rep, eos_rep)
 
-        return (results[0] * self.ytra_mean) + self.ytra_std, (results[1] * self.ytol_mean) + self.ytol_std, results[2]
+        return (results[0] * self.ytra_std) + self.ytra_mean, (results[1] * self.ytol_std) + self.ytol_mean, results[2]
