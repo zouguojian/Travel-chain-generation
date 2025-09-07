@@ -3,27 +3,28 @@ import numpy as np
 from data.Dataload import load_dataset, load_adjs
 from model.DMTLN import DmtlnModel
 import argparse
-from utils.utils_ import log_string,count_parameters, _compute_loss
+from utils.utils_ import log_string,count_parameters, _compute_loss, _compute_cla_loss
 import pandas as pd
+import random
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--num_his', type=int, default=12, help='history steps')
-parser.add_argument('--num_pred', type=int, default=12, help='prediction steps')
 parser.add_argument('--L', type=int, default=1, help='number of STAtt Blocks')
 parser.add_argument('--K', type=int, default=8, help='number of attention heads')
 parser.add_argument('--d', type=int, default=8, help='dims of each head attention outputs')
 parser.add_argument('--patience', type=int, default=10, help='patience for early stop')
 parser.add_argument('--decay_epoch', type=int, default=10, help='decay epoch')
 
+parser.add_argument('--seed', type=int, default=10, help='random seed')
 parser.add_argument('--num_features', type=int, default=7, help='total number of features')
 parser.add_argument('--emb_size', type=int, default=32, help='size of embedding')
 parser.add_argument('--class_num', type=int, default=10, help='number of classes')
-parser.add_argument('--batch_size', type=int, default=32, help='batch size')
+parser.add_argument('--batch_size', type=int, default=128, help='batch size')
 parser.add_argument('--num_epochs', type=int, default=10, help='number of epochs')
 parser.add_argument('--lr', type=float, default=0.001, help='initial learning rate')
 parser.add_argument('--max_len', type=int, default=10, help='weight decay')
 parser.add_argument('--traffic_file', default='./data/', help='traffic file')
-parser.add_argument('--model_file', default='./data/best_model.pth', help='save the model to disk')
+parser.add_argument('--model_file', default='best_model.pth', help='save the model to disk')
 parser.add_argument('--segment_station_with_distance', default='./data/states/segment_station_with_distance.csv', help='segment station with distance')
 parser.add_argument('--log_file', default='./data/log', help='log file')
 args = parser.parse_args()
@@ -31,7 +32,15 @@ args = parser.parse_args()
 log = open(args.log_file, 'w')
 log_string(log, str(args)[10: -1])
 
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if args.seed is not None:
+    seed = args.seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    np.random.seed(seed)
+    random.seed(seed)
+
+# device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 log_string(log, 'device using: {:}'.format(device))
 
@@ -107,8 +116,8 @@ def validate_model(model, val_loader, device):
 
 # 测试函数
 def test_model(model, test_loader, device):
-    model.load_state_dict(torch.load(args.model_file, map_location=torch.device(device), weights_only=False))
-    # model = model.to(device)
+    model.load_state_dict(torch.load(args.model_file, map_location=device, weights_only=False))
+    model.to(device)
     model.eval()
 
     test1_loss = 0
@@ -116,11 +125,13 @@ def test_model(model, test_loader, device):
     labels_dict = {i:[] for i in range(max_route)}
     preds_dict = {i:[] for i in range(max_route)}
     with torch.no_grad():
+        i = 0
         for batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_cla, batch_l in test_loader:
             batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_y, batch_cla = (batch_x.to(device), batch_flow.to(device), batch_speed.to(device), batch_dow.to(device), batch_mod.to(device), batch_y.to(device), batch_cla.to(device))
             pred1, pred2, pred3 = model(batch_x, batch_flow, batch_speed, batch_dow, batch_mod, batch_cla, batch_l, df, adjs = [geo_flow_adj, sem_flow_adj, geo_speed_adj, sem_speed_adj])
-            preds_dict[batch_x.cpu().numpy()[0, 0, 5]].append(np.concatenate((pred2.cpu().numpy(), pred1.cpu().numpy()), axis=1))
-            labels_dict[batch_x.cpu().numpy()[0, 0, 5]].append(batch_y.cpu().numpy())
+            # print(batch_x.cpu().numpy()[0, batch_cla.cpu().numpy()[0, 0], 0, 5]) # [1, routes, max_length, num_fields]
+            preds_dict[int(batch_x.cpu().numpy()[0, batch_cla.cpu().numpy()[0, 0], 0, 5])].append(np.concatenate((pred2.cpu().numpy(), pred1.cpu().numpy()), axis=1))
+            labels_dict[int(batch_x.cpu().numpy()[0, batch_cla.cpu().numpy()[0, 0], 0, 5])].append(batch_y.cpu().numpy())
 
             # 计算每个任务的损失, 将标签中的-1替换为0以满足loss的要求
             valid_batch_y = torch.where(batch_y[:,1:] == -1, torch.zeros_like(batch_y[:,1:]), batch_y[:,1:])  # [B, current_max_L, 1]
@@ -129,6 +140,8 @@ def test_model(model, test_loader, device):
             # loss3 = criterion_task3(out3.squeeze(), batch_y3.squeeze())
             test1_loss += loss1.item()
             test2_loss += loss2.item()
+            i+=1
+            if i == 5000: break
 
     for i in range(len(labels_dict)):
         preds_dict[i] = np.array(preds_dict[i], dtype=np.float32)
@@ -154,10 +167,10 @@ def main():
     log_string(log, 'trainable parameters: {:,}'.format(parameters))
 
     # 训练和验证
-    train_model(model, val_loader, val_loader, args.num_epochs, args.lr, device, log)
+    # train_model(model, train_loader, val_loader, args.num_epochs, args.lr, device, log)
 
     # 测试
-    # test_model(model, test_loader, device)
+    test_model(model, test_loader, device)
 
 
 if __name__ == "__main__":
