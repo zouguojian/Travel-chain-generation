@@ -162,49 +162,6 @@ class SpatiotemporalModel(nn.Module):
     def forward(self, x):
         return x
 
-class MultiTaskModel(nn.Module):
-    def __init__(self, in_features, hidden_channels=64):
-        super(MultiTaskModel, self).__init__()
-
-        # Task 1: Regression [B, L]
-        self.task1 = nn.Sequential(
-            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
-        )
-
-        # Task 2: Regression [B, 1]
-        self.task2 = nn.Sequential(
-            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1),
-        )
-
-        # Task 3: Classification [B, L] with Softmax on L dimension
-        self.task3 = nn.Sequential(
-            nn.Conv1d(in_channels=in_features, out_channels=hidden_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
-        )
-        # self.softmax = nn.Softmax(dim=1)  # Softmax along L dimension
-
-    def forward(self, x1, x2, x3 = None):
-        # x1: [B, L, D], x2: [B, D, 1]
-
-        # Task 1
-        x_perm = x1.permute(0, 2, 1)  # [B, D, L]
-        task1_out = self.task1(x_perm).squeeze(1)  # [B, 1, L] -> [B, L]
-
-        # Task 2
-        task2_out = self.task2(x2).squeeze(1)  # [B, 1]
-
-        # Task 3
-        t3 = self.task3(x_perm)  # [B, 1, L]
-        task3_out = t3.squeeze(1)  # [B, L]
-        # task3_out = self.softmax(task3_out)  # [B, L], probabilities sum to 1 along L
-
-        return task1_out, task2_out, task3_out
-
 # DeepFIN模型定义
 class DeepFinModel(nn.Module):
     def __init__(self, field_dims, num_features, embed_dim=32, hidden_dims=[64, 32], dropout=0.2):
@@ -568,6 +525,64 @@ class FlowSpeedFusion(nn.Module):
 
         return X
 
+class MultiTaskModel(nn.Module):
+    def __init__(self, in_features_1, in_features_2, hidden_channels=64):
+        super(MultiTaskModel, self).__init__()
+
+        # Task 1: Regression [B, L]
+        self.task1 = nn.Sequential(
+            nn.Conv1d(in_channels=in_features_1, out_channels=hidden_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1)
+        )
+
+        # Task 2: Regression [B, 1]
+        self.task2 = nn.Sequential(
+            nn.Conv1d(in_channels=in_features_1, out_channels=hidden_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=hidden_channels, out_channels=1, kernel_size=3, padding=1),
+        )
+
+        # Task 3: Classification [B, L] with Softmax on L dimension
+        # 第一次 Sequential：卷积 (D -> 1) + ReLU
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels=in_features_1,  out_channels=hidden_channels, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),  # ReLU 激活函数
+            nn.Conv2d(in_channels=hidden_channels, out_channels=1, kernel_size=3, stride=1, padding=1)
+        )
+
+        # 第二次 Sequential：卷积 (L -> 1) + ReLU
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_channels=in_features_2,  out_channels=hidden_channels, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),  # ReLU 激活函数
+            nn.Conv2d(in_channels=hidden_channels, out_channels=1, kernel_size=3, stride=1, padding=1)
+        )
+        # self.softmax = nn.Softmax(dim=1)  # Softmax along L dimension
+
+    def forward(self, x1, x2, x3 = None):
+        # x1: [B, L, D], x2: [B, D, 1], x3: [B, R, L, D]
+
+        # Task 1
+        x_perm = x1.permute(0, 2, 1)  # [B, D, L]
+        task1_out = self.task1(x_perm).squeeze(1)  # [B, 1, L] -> [B, L]
+
+        # Task 2
+        task2_out = self.task2(x2).squeeze(1)  # [B, 1]
+
+        # Task 3
+        x3 = x3.permute(0, 3, 1, 2).contiguous()  # [B, D, R, L]
+        # 第一次卷积
+        x3 = self.conv1(x3)  # 输出形状为 [B, 1, R, L]
+        # 调整形状为第二次卷积：将 L-2 作为通道
+        x3 = x3.permute(0, 3, 1, 2).contiguous()  # [B, L, 1, R]
+        # 第二次卷积
+        x3 = self.conv2(x3)  # 输出形状为 [B, 1, 1, R]
+        # 调整输出形状为 [B, R, 1, 1]
+        task3_out = x3.squeeze(1).squeeze(1) # [B, R]
+        # task3_out = self.softmax(task3_out)  # [B, L], probabilities sum to 1 along L
+
+        return task1_out, task2_out, task3_out
+
 def segment_states_paded(x, indices, max_l):
     '''
      x shape: (B, T, N, D)
@@ -585,10 +600,9 @@ class DmtlnModel(nn.Module):
     def __init__(self, field_dims,
                  num_features,
                  embed_size = 32,
-                 class_num = 10,
-                 N_spped = 106,
-                 N_flow = 66,
-                 max_len = 15, ytra_mean = 0.0, ytra_std = 1.0, ytol_mean =0.0, ytol_std = 1.0):
+                 max_S = 15,   # 用于定义最长的初始化位置编码
+                 max_R = 10,      # 最长的路段数
+                 ytra_mean = 0.0, ytra_std = 1.0, ytol_mean =0.0, ytol_std = 1.0):
         super(DmtlnModel, self).__init__()
         self.ytra_mean = ytra_mean
         self.ytra_std = ytra_std
@@ -605,10 +619,10 @@ class DmtlnModel(nn.Module):
         self.finmodel = DeepFinModel(field_dims, num_features, embed_dim=embed_size, hidden_dims=[64, embed_size], dropout=0.2)
 
         # 全局注意力定义，这里不使用多头注意力，但是使用了mask和position机制
-        self.holisticatt = HolisticAttention(embed_size, 1, 1, embed_size * 2, 0.2, max_len)
+        self.holisticatt = HolisticAttention(embed_size, 1, 1, embed_size * 2, 0.2, max_S)
 
         # 多任务模块定义
-        self.multitask = MultiTaskModel(in_features = embed_size, hidden_channels=64)
+        self.multitask = MultiTaskModel(in_features_1 = embed_size, in_features_2=max_R, hidden_channels=64)
 
     def forward(self, x, x_flow, x_speed, batch_dow, batch_mod, batch_cla, seq_lengths, df, adjs = []):
         # x: [batch_size, routes, max_length, num_fields]
@@ -632,18 +646,20 @@ class DmtlnModel(nn.Module):
         segment_states = segment_states.view(batch_size * routes, max_length, self.embed_size)  # [batch_size * routes, max_length, D]
         # 经过FIN进行路段级别特征提取
         x = self.finmodel(x, segment_states) # [batch_size * routes, max_length, num_fields]
-        _, new_length, new_dim = x.shape
-        x = x.view(batch_size, routes, new_length, new_dim)[torch.arange(batch_size), batch_cla.view(batch_size)]
+        new_batch, new_length, new_dim = x.shape
+        x = x.view(batch_size, routes, new_length, new_dim) # [B, R, L, D]
+        routes_rep = x
+        x = x[torch.arange(batch_size), batch_cla.view(batch_size)]
         x = self.holisticatt(x, seq_lengths)  # [batch_size, L+2, D], [B]
 
-        # Select all valid token representation for travel time on each segment
+        # Select all valid segment representations for travel time on each segment
         max_len = max(seq_lengths)
-        valid_rep = x[torch.arange(x.size(0)), 1 : max_len + 1] # [B, L, D]
+        segs_rep = x[torch.arange(x.size(0)), 1 : max_len + 1] # [B, L, D]
 
         # Select EOS token representation for total travel time
         eos_indices = torch.tensor([l + 1 for l in seq_lengths], device=x.device)
         eos_rep = x[torch.arange(x.size(0)), eos_indices].unsqueeze(-1)  # [B, D]
 
-        results = self.multitask(valid_rep, eos_rep)
+        results = self.multitask(segs_rep, eos_rep, routes_rep)
 
         return (results[0] * self.ytra_std) + self.ytra_mean, (results[1] * self.ytol_std) + self.ytol_mean, results[2]
