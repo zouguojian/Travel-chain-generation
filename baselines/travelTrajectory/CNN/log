@@ -1,0 +1,1 @@
+num_his=12, L=1, K=8, d=8, patience=10, decay_epoch=10, max_seg=108, seed=10, num_features=5, emb_size=32, class_num=10, batch_size=128, num_epochs=100, lr=0.001, max_R=8, max_S=10, dropout=0.1, traffic_file='./data/', model_file='best_model.pth', segment_station_with_distance='./data/states/segment_station_with_distance.csv', log_file='log', test=False
