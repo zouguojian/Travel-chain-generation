@@ -6,7 +6,7 @@ import numpy as np
 import os
 from Dataload import load_dataset
 
-from model import MultiLayerCNN
+from model import MultiLayerMLP
 
 import argparse
 from utils.utils_ import log_string,count_parameters, _compute_cla_loss, compute_macro_metrics
@@ -33,7 +33,7 @@ parser.add_argument('--max_R', type=int, default=8, help='max length of routes')
 parser.add_argument('--max_S', type=int, default=10, help='max length of sequence for position embedding')
 parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
 parser.add_argument('--traffic_file', default='./data/', help='traffic file')
-parser.add_argument('--model_file', default='./baselines/travelTrajectory/CNN/best_model.pth', help='save the model to disk')
+parser.add_argument('--model_file', default='./baselines/travelTrajectory/DNN/best_model.pth', help='save the model to disk')
 parser.add_argument('--segment_station_with_distance', default='./data/states/segment_station_with_distance.csv', help='segment station with distance')
 parser.add_argument('--log_file', default='log', help='log file')
 parser.add_argument("--test", action="store_true", help="test program")
@@ -123,7 +123,7 @@ def test_model(model, test_loader, device):
 
         cla_preds = np.array(cla_preds, dtype=np.int32)
         cla_labels = np.array(cla_labels, dtype=np.int32)
-        np.savez_compressed('data/results/DMTLN-YINCHUAN', **{'prediction': cla_preds, 'truth': cla_labels})
+        np.savez_compressed('data/results/DNN-YINCHUAN', **{'prediction': cla_preds, 'truth': cla_labels})
         macro_precision, macro_recall, macro_f1 = compute_macro_metrics(np.reshape(cla_labels, [-1]),
                                                                         np.reshape(cla_preds, [-1]))
 
@@ -137,7 +137,7 @@ def main():
     field_dims = [max_city, max_plate, max_v_type, max_dow, max_mod]  # 前六个field的取值范围
 
     # 初始化模型
-    model = MultiLayerCNN(field_dims=field_dims,
+    model = MultiLayerMLP(field_dims=field_dims,
                           num_features = args.num_features,
                           embed_dim=args.emb_size,
                           num_classes=args.class_num)
