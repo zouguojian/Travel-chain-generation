@@ -123,7 +123,7 @@ def test_model(model, test_loader, device):
 
         cla_preds = np.array(cla_preds, dtype=np.int32)
         cla_labels = np.array(cla_labels, dtype=np.int32)
-        np.savez_compressed('data/results/DNN-YINCHUAN', **{'prediction': cla_preds, 'truth': cla_labels})
+        np.savez_compressed('data/results/DNN-tra', **{'prediction': cla_preds, 'truth': cla_labels})
         macro_precision, macro_recall, macro_f1 = compute_macro_metrics(np.reshape(cla_labels, [-1]),
                                                                         np.reshape(cla_preds, [-1]))
 
