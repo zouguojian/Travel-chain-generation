@@ -6,7 +6,7 @@ import numpy as np
 import os
 from Dataload import load_dataset
 
-from model import MultiLayerCNN
+from model import WideDeepRecurrent
 
 import argparse
 from utils.utils_ import log_string,count_parameters, _compute_cla_loss, compute_macro_metrics
@@ -50,10 +50,13 @@ if args.seed is not None:
     np.random.seed(seed)
     random.seed(seed)
 
-train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod = load_dataset(args.traffic_file, args.batch_size, test_batch_size=128)
+train_loader, val_loader, test_loader, max_city, max_plate, max_v_type, max_dow, max_mod, ytra_mean, ytra_std, ytol_mean, ytol_std = load_dataset(args.traffic_file, args.batch_size, test_batch_size=128)
+log_string(log, f'max_city:   {max_city}\t\tmax_plate:   {max_plate}\t\tmax_v_type:   {max_v_type}')
+log_string(log, f'ytra_mean:   {ytra_mean:.4f}\t\tytra_std:   {ytra_std:.4f}')
+log_string(log, f'ytol_mean:   {ytol_mean:.4f}\t\tytol_std:   {ytol_std:.4f}')
 # device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-
+log_string(log, 'device using: {:}'.format(device))
 
 # 训练函数
 def train_model(model, train_loader, val_loader, epochs, lr, device, log):
@@ -134,13 +137,15 @@ def test_model(model, test_loader, device):
 # 主函数
 def main():
     # 超参数
-    field_dims = [max_city, max_plate, max_v_type, max_dow, max_mod]  # 前六个field的取值范围
+    field_dims = [max_city, max_plate, max_v_type, max_dow, args.max_seg + 1]  # 前六个field的取值范围
 
     # 初始化模型
-    model = MultiLayerCNN(field_dims=field_dims,
-                          num_features = args.num_features,
-                          embed_dim=args.emb_size,
-                          num_classes=args.class_num)
+    model = WideDeepRecurrent(dense_dim = 2,
+                              sparse_vocab_sizes = field_dims,
+                              sparse_embed_dim = args.emb_size,
+                              hidden_dim = 256,
+                              num_deep_layers = 3,
+                              lstm_input_dim = 2)
     parameters = count_parameters(model)
     log_string(log, 'trainable parameters: {:,}'.format(parameters))
 
